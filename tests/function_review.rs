@@ -362,19 +362,19 @@ fn declared_free_functions_and_multiline_calls_are_supported() {
 }
 
 #[test]
-fn ambiguous_java_overloads_are_explicit_analysis_gaps() {
+fn overloads_with_distinct_parameter_types_are_compared() {
     let old = "class Worker {\nvoid process(Order order) { order.amount = 1; repository.save(order); }\nvoid process(Other order) { repository.save(order); }\n}\n";
     let repo = Repo::new("Worker.java", old, None);
     fs::write(repo.path.join("Worker.java"), old.replace("= 1", "= 2")).unwrap();
     repo.commit();
     let report = repo.report();
-    assert!(function_findings(&report).is_empty());
+    assert_eq!(function_findings(&report).len(), 1);
     assert!(
         report["function_analysis"]["warnings"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|v| v.as_str().unwrap().contains("ambiguous"))
+            .all(|v| !v.as_str().unwrap().contains("ambiguous"))
     );
 }
 
