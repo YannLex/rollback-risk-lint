@@ -1,21 +1,44 @@
-# Working on rollback-risk-lint
+# Contributing to rollback-risk-lint
 
-Keep rules independent of the target application's build system and runtime.
-Call findings review signals unless the evidence supports a stronger claim.
-No findings must never be presented as proof of rollback safety.
+This guide applies to developers and coding agents working on the linter.
+The tool helps review agents investigate effects that can survive a code rollback.
+Read [README.md](README.md) for usage and development commands, and
+[the agent review protocol](docs/agent-review.md) before changing review decisions.
 
-Add regression tests for new rules and diff parsing changes. Preserve exit codes:
-0 completed below threshold, 1 findings at threshold, 2 input/tool failure.
-Preserve old-side locations for removals and merge-base semantics for revision input.
-Never execute the target repository's diff drivers, textconv or application code.
+## Design constraints
 
-Before committing: cargo fmt --check, cargo clippy --locked --all-targets -- -D warnings,
-and cargo test --locked. Do not introduce secrets or copy source from other projects.
+- Keep analysis independent of the target application's build system and runtime.
+  Never execute its application code, Git diff drivers or textconv filters to scan it.
+- Treat heuristic findings as review signals. Neither an empty scan nor a completed
+  review proves rollback safety. Keep observations, inferred risks and evidence
+  limitations distinct in output and documentation.
+- Keep scanning and receipt validation separate from merge execution. `ALLOW`
+  completes this review stage; it does not grant repository merge authorization
+  or replace required checks, other reviews or branch protection.
 
-Use the GitHub account identity for commits in this repository: YannLex
-<3049310+YannLex@users.noreply.github.com>. Do not inherit another repository’s identity.
+## Compatibility and review focus
 
-Repository-specific evaluation reports, MR identifiers, source patches and raw
-findings must remain local under ignored `docs/evaluations/` or outside the repo.
-Do not add them to tracked docs, release notes, packages or CI logs. Examples and
-regression fixtures must be synthetic and contain no internal project identifiers.
+- Preserve merge-base diff semantics, trusted base-revision policy loading and
+  old-side locations for removed code. A target change must not disable its own
+  checks by editing its policy or supplying a review receipt.
+- Preserve documented exit codes and JSON contracts. Review protocol changes must
+  retain freshness checks and require complete-diff coverage even with no findings.
+- Evidence in a receipt is a trusted review agent's attestation, not verified proof.
+  Do not automatically resolve findings with canned evidence or accept PR-authored
+  receipts as authoritative.
+
+## Validation
+
+Add regression cases for changed detection rules, diff parsing and review decisions.
+Use synthetic fixtures that exercise both useful findings and false positives.
+Before committing, run `cargo fmt --check`,
+`cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked`.
+For CLI or packaging changes, also run the native smoke test described by CI.
+
+## Evaluation privacy
+
+Keep repository-specific evaluations, source patches, PR/MR identifiers and raw
+findings under ignored `docs/evaluations/` or outside this repository. Do not copy
+other projects' source, secrets or internal identifiers into tracked fixtures,
+documentation, release notes, packages or CI logs. Shared examples must be synthetic;
+release packages contain only the executable, generic README and license.
