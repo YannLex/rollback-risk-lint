@@ -463,3 +463,31 @@ fn effect_calls_nested_in_logging_or_interpolation_are_not_hidden() {
         assert_eq!(function_findings(&repo.report()).len(), 1, "{wrapper}");
     }
 }
+
+#[test]
+fn agent_review_cli_recomputes_packet_and_rejects_changed_heads() {
+    let repo = Repo::new("worker.py", "x = 1\n", None);
+    fs::write(repo.path.join("worker.py"), "x = 2\n").unwrap();
+    repo.commit();
+    let output = repo.run(&["--agent-review"]);
+    assert!(output.status.success());
+    let packet: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(packet["head_sha"], repo.git(&["rev-parse", "HEAD"]));
+    let receipt = repo.path.join("receipt.json");
+    fs::write(&receipt,json!({"packet":packet,"resolutions":[{"id":"coverage","status":"verified","evidence":["Reviewed all changes and downstream effects"]}]}).to_string()).unwrap();
+    let flags = ["--agent-review", "--review", receipt.to_str().unwrap()];
+    let allowed = repo.run(&flags);
+    assert_eq!(allowed.status.code(), Some(0));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&allowed.stdout).unwrap()["verdict"],
+        "ALLOW"
+    );
+    fs::write(repo.path.join("worker.py"), "x = 3\n").unwrap();
+    repo.git(&["commit", "-am", "new head"]);
+    let stale = repo.run(&flags);
+    assert_eq!(stale.status.code(), Some(1));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&stale.stdout).unwrap()["verdict"],
+        "INCOMPLETE"
+    );
+}

@@ -45,6 +45,12 @@ struct Args {
     /// Trusted JSON policy file; otherwise revision mode uses the base-revision policy
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Emit an agent-review packet (requires revision mode)
+    #[arg(long, requires = "base")]
+    agent_review: bool,
+    /// Validate agent resolutions against a freshly generated current packet
+    #[arg(long, requires = "agent_review")]
+    review: Option<PathBuf>,
     /// Include test and fixture files (excluded by default)
     #[arg(long)]
     include_tests: bool,
@@ -176,6 +182,33 @@ fn run(args: Args) -> Result<bool, String> {
             });
         }
         review_functions(&mut report, &lines, &files, &policy);
+    }
+    if args.agent_review {
+        let (_, head, base) = revisions
+            .as_ref()
+            .ok_or("Agent review requires revisions")?;
+        let packet = rollback_risk_lint::review_protocol::packet(
+            base,
+            head,
+            serde_json::to_value(&policy).map_err(|e| e.to_string())?,
+            serde_json::to_value(&report).map_err(|e| e.to_string())?,
+        );
+        if let Some(path) = &args.review {
+            let review =
+                serde_json::from_str(&fs::read_to_string(path).map_err(|e| e.to_string())?)
+                    .map_err(|e| format!("Invalid review JSON: {e}"))?;
+            let decision = rollback_risk_lint::review_protocol::verdict(&packet, &review);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&decision).map_err(|e| e.to_string())?
+            );
+            return Ok(decision["verdict"] != "ALLOW");
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&packet).map_err(|e| e.to_string())?
+        );
+        return Ok(false);
     }
     match args.format {
         Format::Json => println!(

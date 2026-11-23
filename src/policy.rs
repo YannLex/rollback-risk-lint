@@ -1,7 +1,7 @@
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectKind {
     Persistence,
@@ -27,7 +27,7 @@ impl EffectKind {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CallPattern {
     pub receiver: String,
@@ -45,7 +45,7 @@ impl CallPattern {
                     && receiver.ends_with(&format!(".{}", self.receiver))))
     }
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EffectRule {
     pub name: String,
@@ -56,7 +56,7 @@ pub struct EffectRule {
     pub path_suffix: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
     pub version: u32,
