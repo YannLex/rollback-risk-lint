@@ -41,6 +41,8 @@ jobs:
         run: |
           target/${{ matrix.target }}/release/${{ matrix.exe }} --version
           target/${{ matrix.target }}/release/${{ matrix.exe }} --diff examples/risky.patch --format json --fail-on never
+      - name: Smoke test function review in all supported languages
+        run: python3 scripts/smoke.py target/${{ matrix.target }}/release/${{ matrix.exe }}
       - name: Package binary and checksums
         run: python3 scripts/package.py ${{ matrix.target }}
       - uses: actions/upload-artifact@v7.0.2
