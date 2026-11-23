@@ -34,9 +34,22 @@ fn is_function(node: Node<'_>) -> bool {
     ]
     .contains(&node.kind())
 }
+fn contains_call(node: Node<'_>) -> bool {
+    if ["method_invocation", "call", "call_expression"].contains(&node.kind()) {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).any(contains_call)
+}
 fn logging(node: Node<'_>, source: &str) -> bool {
     if node.kind() != "expression_statement" {
         return false;
+    }
+    if let Some(call) = node.named_child(0) {
+        let mut cursor = call.walk();
+        if call.named_children(&mut cursor).any(contains_call) {
+            return false;
+        }
     }
     let target: String = text(node, source)
         .split('(')
@@ -53,7 +66,9 @@ fn logging(node: Node<'_>, source: &str) -> bool {
 }
 fn docstring(node: Node<'_>) -> bool {
     node.kind() == "expression_statement"
-        && node.named_child(0).is_some_and(|n| n.kind() == "string")
+        && node
+            .named_child(0)
+            .is_some_and(|n| n.kind() == "string" && !contains_call(n))
         && node
             .parent()
             .is_some_and(|p| p.kind() == "block" && p.named_child(0) == Some(node))
