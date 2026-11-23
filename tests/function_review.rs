@@ -1,4 +1,6 @@
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicU64, Ordering};
+static NEXT_REPO: AtomicU64 = AtomicU64::new(0);
 use std::{
     fs,
     path::PathBuf,
@@ -27,7 +29,8 @@ impl Repo {
     }
     fn new(path: &str, source: &str, policy: Option<Value>) -> Self {
         let dir = std::env::temp_dir().join(format!(
-            "rrl-functions-{}-{}",
+            "rrl-functions-{}-{}-{}",
+            NEXT_REPO.fetch_add(1, Ordering::Relaxed),
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -286,4 +289,147 @@ fn syntax_errors_are_reported_as_function_analysis_gaps() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn latest_target_branch_policy_is_used_after_branches_diverge() {
+    let old = "def process(order):\n    order.amount = 1\n    gateway.replace(order)\n";
+    let mut repo = Repo::new("worker.py", old, None);
+    repo.git(&["checkout", "-b", "feature"]);
+    fs::write(repo.path.join("worker.py"), old.replace("= 1", "= 2")).unwrap();
+    repo.commit();
+    repo.git(&["checkout", "main"]);
+    repo.policy(policy("replace"));
+    repo.commit();
+    repo.base = repo.git(&["rev-parse", "HEAD"]);
+    repo.git(&["checkout", "feature"]);
+    assert_eq!(function_findings(&repo.report()).len(), 1);
+}
+
+#[test]
+fn empty_or_misspelled_base_policy_is_not_silently_ignored() {
+    for text in ["", "{\"version\":1,\"efffects\":[]}"] {
+        let mut repo = Repo::new("worker.py", "x = 1\n", None);
+        fs::write(repo.path.join(".rollback-risk-lint.json"), text).unwrap();
+        repo.commit();
+        repo.base = repo.git(&["rev-parse", "HEAD"]);
+        fs::write(repo.path.join("worker.py"), "x = 2\n").unwrap();
+        repo.commit();
+        assert_eq!(repo.run(&[]).status.code(), Some(2));
+    }
+}
+
+#[test]
+fn a_known_local_map_is_not_a_function_effect() {
+    let old = "class Worker { void process(Order order) {\nMap<String, String> client = new HashMap<>();\norder.amount = 1;\nclient.put(key, value);\n} }\n";
+    let repo = Repo::new("Worker.java", old, None);
+    fs::write(repo.path.join("Worker.java"), old.replace("= 1", "= 2")).unwrap();
+    repo.commit();
+    assert!(function_findings(&repo.report()).is_empty());
+}
+
+#[test]
+fn string_whitespace_is_data_while_docstrings_are_ignored() {
+    let old = "def process(order):\n    payload = ' '\n    repository.save(payload)\n";
+    let repo = Repo::new("worker.py", old, None);
+    fs::write(repo.path.join("worker.py"), old.replace("' '", "''")).unwrap();
+    repo.commit();
+    assert_eq!(function_findings(&repo.report()).len(), 1);
+    let old = "def process(order):\n    'documentation'\n    repository.save(order)\n";
+    let repo = Repo::new("worker.py", old, None);
+    fs::write(
+        repo.path.join("worker.py"),
+        old.replace("documentation", "updated documentation"),
+    )
+    .unwrap();
+    repo.commit();
+    assert!(function_findings(&repo.report()).is_empty());
+}
+
+#[test]
+fn declared_free_functions_and_multiline_calls_are_supported() {
+    let old = "def process(order):\n    order.amount = 1\n    persist(\n        order\n    )\n";
+    let repo = Repo::new(
+        "worker.py",
+        old,
+        Some(
+            json!({"version":1,"effects":[{"name":"free-write","receiver":"","method":"persist","kind":"persistence"}]}),
+        ),
+    );
+    fs::write(repo.path.join("worker.py"), old.replace("= 1", "= 2")).unwrap();
+    repo.commit();
+    assert_eq!(function_findings(&repo.report()).len(), 1);
+}
+
+#[test]
+fn ambiguous_java_overloads_are_explicit_analysis_gaps() {
+    let old = "class Worker {\nvoid process(Order order) { order.amount = 1; repository.save(order); }\nvoid process(Other order) { repository.save(order); }\n}\n";
+    let repo = Repo::new("Worker.java", old, None);
+    fs::write(repo.path.join("Worker.java"), old.replace("= 1", "= 2")).unwrap();
+    repo.commit();
+    let report = repo.report();
+    assert!(function_findings(&report).is_empty());
+    assert!(
+        report["function_analysis"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap().contains("ambiguous"))
+    );
+}
+
+#[test]
+fn wildcard_rules_are_path_scoped_and_effects_override_pure_rules() {
+    let old = "def process(order):\n    order.amount = 1\n    custom.commit(order)\n";
+    let repo = Repo::new(
+        "worker.py",
+        old,
+        Some(
+            json!({"version":1,"effects":[{"name":"write","receiver":"*","method":"commit","kind":"message","path_suffix":"worker.py"}],"pure":[{"receiver":"custom","method":"commit"}]}),
+        ),
+    );
+    fs::write(repo.path.join("worker.py"), old.replace("= 1", "= 2")).unwrap();
+    repo.commit();
+    let report = repo.report();
+    assert_eq!(function_findings(&report).len(), 1);
+    assert_eq!(function_findings(&report)[0]["boundary"]["kind"], "message");
+}
+
+#[test]
+fn deleted_declared_free_call_keeps_old_side_evidence() {
+    let old = "def process(order):\n    persist(order)\n";
+    let repo = Repo::new(
+        "worker.py",
+        old,
+        Some(
+            json!({"version":1,"effects":[{"name":"free-write","receiver":"","method":"persist","kind":"persistence"}]}),
+        ),
+    );
+    fs::write(
+        repo.path.join("worker.py"),
+        "def process(order):\n    return order\n",
+    )
+    .unwrap();
+    repo.commit();
+    let report = repo.report();
+    assert!(
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["side"] == "old" && f["boundary"]["source"] == "configured")
+    );
+}
+
+#[test]
+fn configured_call_names_in_changed_strings_are_not_declared_effects() {
+    let old = "def process(order):\n    text = 'gateway.replace(order)'\n    return text\n";
+    let repo = Repo::new("worker.py", old, Some(policy("replace")));
+    fs::write(
+        repo.path.join("worker.py"),
+        old.replace("replace(order)", "replace(order.copy())"),
+    )
+    .unwrap();
+    repo.commit();
+    assert!(repo.report()["findings"].as_array().unwrap().is_empty());
 }

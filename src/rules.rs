@@ -1,4 +1,5 @@
-use crate::{ChangedLine, Evidence, Finding, Report};
+use crate::policy::{Matcher, Policy};
+use crate::{Boundary, ChangedLine, Evidence, Finding, FunctionAnalysis, Report};
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -6,7 +7,7 @@ fn regex(pattern: &str) -> Regex {
     Regex::new(pattern).expect("built-in rule regex")
 }
 
-fn is_test(path: &str) -> bool {
+pub(crate) fn is_test(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     let name = path.rsplit('/').next().unwrap_or(path);
     let stem = name.split('.').next().unwrap_or(name);
@@ -73,25 +74,18 @@ pub fn analyze(lines: &[ChangedLine]) -> Report {
 }
 
 pub fn analyze_with_options(lines: &[ChangedLine], include_tests: bool) -> Report {
+    analyze_with_policy(lines, include_tests, &Policy::default())
+}
+
+pub fn analyze_with_policy(lines: &[ChangedLine], include_tests: bool, policy: &Policy) -> Report {
+    let matcher = Matcher::new(policy);
     let destructive = regex(
         r"(?i)\b(drop\s+(table|database|schema|column)\b|truncate\s+(table\s+)?[\w\x22`]|alter\s+table\b.*\bdrop\b)",
     );
     let mutation = regex(r"(?i)\b(update\s+[\w\x22`]+\s+set\b|delete\s+from\b)");
     let idempotency = regex(r"(?i)\b(idempotenc\w*|dedup\w*|idempotent\w*)\b");
-    let calls = regex(r"(?P<receiver>[A-Za-z_$][\w$]*)\s*\.\s*(?P<method>[A-Za-z_$][\w$]*)\s*\(");
-    let storage = regex(
-        r"(?i)(?:^|_)(db|dao|repo|repository|collection|table|storage|store|session|statement|connection|entity_manager|persistence)(?:_|$)",
-    );
-    let external = regex(
-        r"(?i)(?:^|_)(client|http|rest|transport|request|producer|publisher|broker|sender|bridge|writer|bus|mail|smtp|payment|socket|topic|channel)(?:_|$)",
-    );
-    let payment = regex(
-        r"(?i)(?:^|_)(payment|payments|stripe|checkout|billing|gateway|bank|transaction)(?:_|$)",
-    );
-    let camel = regex(r"([a-z0-9])([A-Z])");
-    let acronym = regex(r"([A-Z])([A-Z][a-z])");
-    let local_type = regex(
-        r"\b(?:Map|HashMap|LinkedHashMap|TreeMap|ConcurrentHashMap|ByteBuffer|CRC32|ObjectNode|ArrayNode)(?:<[^;\n=]+>)?\s+(?P<name>[\w$]+)\s*(?:=|;)",
+    let calls = regex(
+        r"(?P<receiver>(?:[A-Za-z_$][\w$]*\s*\.\s*)*[A-Za-z_$][\w$]*)\s*\.\s*(?P<method>[A-Za-z_$][\w$]*)\s*\(",
     );
     let write_config = regex(r"(?i)(write[_.-]?mode|dry[_.-]?run)$");
     let write_component = regex(r"(?i)(writer|repository|persistence|storage)");
@@ -106,6 +100,7 @@ pub fn analyze_with_options(lines: &[ChangedLine], include_tests: bool) -> Repor
         regex(r"(?i)(enabled|destination|topic|binding|queue|write[_.-]?mode|dry[_.-]?run)$");
     let mut findings: Vec<Finding> = Vec::new();
     let mut groups = BTreeMap::new();
+    let mut boundaries = BTreeMap::new();
     let mut skipped = BTreeSet::new();
     let old_text: BTreeSet<_> = lines
         .iter()
@@ -165,8 +160,10 @@ pub fn analyze_with_options(lines: &[ChangedLine], include_tests: bool) -> Repor
                     finding.evidence = line.text.clone();
                 }
                 finding.related_evidence.push(evidence);
+                index
             } else {
-                groups.insert(key, findings.len());
+                let index = findings.len();
+                groups.insert(key, index);
                 findings.push(Finding {
                     rule_id: id,
                     severity,
@@ -177,7 +174,10 @@ pub fn analyze_with_options(lines: &[ChangedLine], include_tests: bool) -> Repor
                     risk,
                     recovery_evidence: recovery,
                     related_evidence: vec![evidence],
+                    boundary: None,
+                    function_name: None,
                 });
+                index
             }
         };
         let hunk = line.hunk.to_string();
@@ -224,46 +224,34 @@ pub fn analyze_with_options(lines: &[ChangedLine], include_tests: bool) -> Repor
             );
         }
         for call in calls.captures_iter(text) {
-            let receiver = &call["receiver"];
-            if local_type
-                .captures_iter(&line.context)
-                .any(|c| &c["name"] == receiver)
-            {
+            let receiver: String = call["receiver"]
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            let method = &call["method"];
+            let Some(effect) = matcher.classify_in(&line.path, &receiver, method, &line.context)
+            else {
                 continue;
-            }
-            let receiver_tokens = acronym.replace_all(receiver, "${1}_${2}");
-            let receiver_tokens = camel
-                .replace_all(&receiver_tokens, "${1}_${2}")
-                .to_ascii_lowercase();
-            let method = call["method"].to_ascii_lowercase();
-            let group = format!("{hunk}:{}:{method}", receiver.to_ascii_lowercase());
-            let persistence = method.starts_with("save")
-                || method.starts_with("insert")
-                || (storage.is_match(&receiver_tokens)
-                    && ["update", "delete", "remove", "exec", "write"]
-                        .iter()
-                        .any(|prefix| method.starts_with(prefix)));
-            if persistence {
-                emit(
-                    "RRL004",
-                    "review",
-                    group,
-                    "A changed likely persistence call may leave effects after code rollback; receiver names are heuristic evidence.",
-                    "Confirm the receiver's actual effect, write identity, scope, values and incorrect-write repair procedure.",
-                );
-            } else if (external.is_match(&receiver_tokens)
-                && ["publish", "send", "produce", "post", "put", "patch"]
-                    .contains(&method.as_str()))
-                || (payment.is_match(&receiver_tokens)
-                    && ["capture", "charge", "refund"].contains(&method.as_str()))
-            {
-                emit(
-                    "RRL005",
-                    "review",
-                    group,
-                    "A changed likely outbound call may affect queues, users or external systems beyond rollback; confirm the receiver's effect.",
-                    "Identify the destination, retry behavior, compensation and queued/in-flight work handling.",
-                );
+            };
+            let index = emit(
+                effect.kind.rule(),
+                "review",
+                format!("{hunk}:{receiver}:{method}"),
+                "A changed candidate effect call may leave persistent or external effects after code rollback; inspect the declared or inferred boundary.",
+                "Confirm the receiver's actual effect, write identity/scope and values, retry behavior, compensation and repair procedure.",
+            );
+            let boundary = Boundary {
+                source: effect.source,
+                kind: effect.kind.as_str(),
+                name: effect.name,
+                receiver: receiver.clone(),
+                method: method.into(),
+                line: line.line,
+                side: line.side,
+                text: line.text.clone(),
+            };
+            if line.side == "new" || !boundaries.contains_key(&index) {
+                boundaries.insert(index, boundary);
             }
         }
         // These bounded context heuristics intentionally do not claim interprocedural data flow.
@@ -298,10 +286,15 @@ pub fn analyze_with_options(lines: &[ChangedLine], include_tests: bool) -> Repor
             );
         }
     }
+    for (index, boundary) in boundaries {
+        findings[index].boundary = Some(boundary);
+    }
     Report {
+        policy_source: "default",
+        function_analysis: FunctionAnalysis { mode: "patch_only", warnings: vec!["Function-level analysis requires base/head revisions; only supplied hunks were scanned.".into()], ..Default::default() },
         schema_version: 1,
         findings,
         skipped_files: skipped.into_iter().collect(),
-        limitation: "Heuristic review signals, not proof of rollback safety. Tests/fixtures are excluded by default. Receiver/component names and bounded hunk context are not type resolution or data-flow analysis. Multiline/indirect effects, unknown naming and most schema formats can be missed.",
+        limitation: "Review candidates, not proof of rollback safety. Repository policy is declarative, not runtime/type verification. Revision-mode Java/Python/Go function comparison associates changes with candidate effects; it is not interprocedural data-flow analysis. Other languages and patch-only input receive hunk checks. Unknown boundaries, upstream helpers, syntax gaps and most schema formats can be missed.",
     }
 }

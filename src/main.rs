@@ -1,5 +1,8 @@
 use clap::{Parser, ValueEnum};
-use rollback_risk_lint::{analyze_with_options, parse_diff};
+use rollback_risk_lint::{
+    FileVersions, analyze_with_policy, parse_diff, policy::Policy, review_functions, supported_path,
+};
+use std::collections::BTreeSet;
 use std::{
     fs,
     io::{self, Read},
@@ -39,6 +42,9 @@ struct Args {
     repo: PathBuf,
     #[arg(long, value_enum, default_value = "text")]
     format: Format,
+    /// Trusted JSON policy file; otherwise revision mode uses the base-revision policy
+    #[arg(long)]
+    config: Option<PathBuf>,
     /// Include test and fixture files (excluded by default)
     #[arg(long)]
     include_tests: bool,
@@ -64,7 +70,16 @@ fn git(args: &Args, command: &[&str]) -> Result<String, String> {
         .map_err(|_| "Non-UTF-8 diff/revision output is unsupported".into())
 }
 
+fn blob(args: &Args, revision: &str, path: &str) -> Result<String, String> {
+    let exists = git(args, &["ls-tree", "--name-only", revision, "--", path])?;
+    if exists.is_empty() {
+        return Ok(String::new());
+    }
+    git(args, &["show", &format!("{revision}:{path}")])
+}
+
 fn run(args: Args) -> Result<bool, String> {
+    let mut revisions = None;
     let patch = if let Some(path) = &args.diff {
         if path.as_os_str() == "-" {
             let mut s = String::new();
@@ -91,6 +106,11 @@ fn run(args: Args) -> Result<bool, String> {
         let base = resolve(base)?;
         let head = resolve(head)?;
         let ancestor = git(&args, &["merge-base", base.trim(), head.trim()])?;
+        revisions = Some((
+            ancestor.trim().to_owned(),
+            head.trim().to_owned(),
+            base.trim().to_owned(),
+        ));
         git(
             &args,
             &[
@@ -111,7 +131,52 @@ fn run(args: Args) -> Result<bool, String> {
     } else {
         return Err("Supply --diff FILE (or -), or both --base REF --head REF".into());
     };
-    let report = analyze_with_options(&parse_diff(&patch)?, args.include_tests);
+    let (policy, policy_source) = if let Some(path) = &args.config {
+        (
+            Policy::parse(
+                &fs::read_to_string(path).map_err(|e| format!("Cannot read policy: {e}"))?,
+            )?,
+            "explicit",
+        )
+    } else if let Some((_, _, base)) = &revisions {
+        let exists = git(
+            &args,
+            &[
+                "ls-tree",
+                "--name-only",
+                base,
+                "--",
+                ".rollback-risk-lint.json",
+            ],
+        )?;
+        let text = blob(&args, base, ".rollback-risk-lint.json")?;
+        if exists.is_empty() {
+            (Policy::default(), "default")
+        } else {
+            (Policy::parse(&text)?, "base")
+        }
+    } else {
+        (Policy::default(), "default")
+    };
+    let lines = parse_diff(&patch)?;
+    let mut report = analyze_with_policy(&lines, args.include_tests, &policy);
+    report.policy_source = policy_source;
+    if let Some((base, head, _)) = &revisions {
+        let paths: BTreeSet<_> = lines
+            .iter()
+            .map(|l| &l.path)
+            .filter(|p| supported_path(p, args.include_tests))
+            .collect();
+        let mut files = Vec::new();
+        for path in paths {
+            files.push(FileVersions {
+                path: path.clone(),
+                before: blob(&args, base, path)?,
+                after: blob(&args, head, path)?,
+            });
+        }
+        review_functions(&mut report, &lines, &files, &policy);
+    }
     match args.format {
         Format::Json => println!(
             "{}",
@@ -130,6 +195,26 @@ fn run(args: Args) -> Result<bool, String> {
                     f.evidence.trim(),
                     f.recovery_evidence
                 );
+            }
+            for f in &report.findings {
+                if let Some(boundary) = &f.boundary {
+                    println!(
+                        "  Boundary: {} {} {}:{} ({}) {}.{}",
+                        boundary.source,
+                        boundary.kind,
+                        f.path,
+                        boundary.line,
+                        boundary.side,
+                        boundary.receiver,
+                        boundary.method
+                    );
+                }
+                if let Some(name) = &f.function_name {
+                    println!("  Function: {name}");
+                }
+            }
+            for warning in &report.function_analysis.warnings {
+                eprintln!("Analysis gap: {warning}");
             }
             println!(
                 "{} finding(s); {} file(s) skipped.\n{}",

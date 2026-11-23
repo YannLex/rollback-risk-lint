@@ -2,8 +2,12 @@ use regex::Regex;
 use serde::Serialize;
 use std::sync::Arc;
 
+mod function_review;
+pub mod policy;
 mod rules;
-pub use rules::{analyze, analyze_with_options};
+mod syntax;
+pub use function_review::{FileVersions, review_functions, supported_path};
+pub use rules::{analyze, analyze_with_options, analyze_with_policy};
 
 #[derive(Debug)]
 pub struct ChangedLine {
@@ -190,6 +194,10 @@ pub struct Finding {
     pub risk: &'static str,
     pub recovery_evidence: &'static str,
     pub related_evidence: Vec<Evidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<Boundary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -205,4 +213,26 @@ pub struct Report {
     pub findings: Vec<Finding>,
     pub skipped_files: Vec<String>,
     pub limitation: &'static str,
+    pub policy_source: &'static str,
+    pub function_analysis: FunctionAnalysis,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Boundary {
+    pub source: &'static str,
+    pub kind: &'static str,
+    pub name: Option<String>,
+    pub receiver: String,
+    pub method: String,
+    pub line: usize,
+    pub side: &'static str,
+    pub text: String,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct FunctionAnalysis {
+    pub mode: &'static str,
+    pub files: usize,
+    pub functions: usize,
+    pub warnings: Vec<String>,
 }
