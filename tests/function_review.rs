@@ -449,3 +449,17 @@ fn syntactically_duplicate_declarations_are_not_paired_arbitrarily() {
             .is_empty()
     );
 }
+
+#[test]
+fn effect_calls_nested_in_logging_or_interpolation_are_not_hidden() {
+    for wrapper in [
+        "logger.info('written', gateway.replace(order))",
+        "f'{gateway.replace(order)}'",
+    ] {
+        let old = format!("def process(order):\n    order.amount = 1\n    {wrapper}\n");
+        let repo = Repo::new("worker.py", &old, Some(policy("replace")));
+        fs::write(repo.path.join("worker.py"), old.replace("= 1", "= 2")).unwrap();
+        repo.commit();
+        assert_eq!(function_findings(&repo.report()).len(), 1, "{wrapper}");
+    }
+}
