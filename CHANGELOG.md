@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+- Add revision-bound packets for trusted coding review agents.
+- Require complete-diff coverage and per-finding/skip/gap evidence dispositions.
+- Recompute packet inputs before returning ALLOW, BLOCK or INCOMPLETE.
+- Reject stale, duplicate, unknown and incomplete receipts; never merge directly.
+- Document trusted receipt handling and exact-head protected merge handoff.
+
 ## 0.3.0
 
 - Add trusted, versioned JSON declarations for effect boundaries and local calls.

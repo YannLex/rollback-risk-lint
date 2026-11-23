@@ -56,6 +56,24 @@ def main():
         assert all(f["boundary"]["source"] == "configured" for f in functions)
         assert report["policy_source"] == "base"
         assert not report["function_analysis"]["warnings"]
+        command = [binary, "--repo", str(root), "--base", base, "--head", "HEAD", "--agent-review"]
+        packet = json.loads(subprocess.check_output(command, env=env, text=True))
+        receipt_path = root / "receipt.json"
+        receipt = {"packet": packet, "resolutions": []}
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        def decision():
+            result = subprocess.run(command + ["--review", str(receipt_path)],
+                                    env=env, capture_output=True, text=True)
+            return result.returncode, json.loads(result.stdout)["verdict"]
+        assert decision() == (1, "INCOMPLETE")
+        receipt["resolutions"] = [{"id": item["id"], "status": "verified",
+                                   "evidence": ["Synthetic smoke-test attestation"]}
+                                  for item in packet["items"]]
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        assert decision() == (0, "ALLOW")
+        (root / "worker.py").write_text(sources["worker.py"].replace("= 1", "= 3"), encoding="utf-8")
+        git("commit", "-am", "new head")
+        assert decision() == (1, "INCOMPLETE")
         print("Native binary: trusted-policy and Java/Python/Go function review passed.")
 
 

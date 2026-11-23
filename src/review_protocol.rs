@@ -43,6 +43,12 @@ pub fn verdict(packet: &Value, review: &Value) -> Value {
     let Some(items) = packet["items"].as_array() else {
         return result("INCOMPLETE", vec!["Invalid packet".into()]);
     };
+    if packet["protocol_version"] != 1 || !items.iter().any(|row| row["id"] == "coverage") {
+        return result(
+            "INCOMPLETE",
+            vec!["Invalid packet or missing coverage assessment".into()],
+        );
+    }
     for row in items {
         let id = row["id"].as_str().unwrap_or("");
         let Some(resolution) = resolutions.remove(id) else {
@@ -56,7 +62,8 @@ pub fn verdict(packet: &Value, review: &Value) -> Value {
         });
         match resolution["status"].as_str() {
             Some("blocked") => blocked.push(format!("Unresolved risk: {id}")),
-            Some("verified" | "false_positive" | "mitigated") if evidence => {}
+            Some("verified") if evidence => {}
+            Some("false_positive" | "mitigated") if evidence && id != "coverage" => {}
             _ => pending.push(format!("Evidence or valid disposition missing: {id}")),
         }
     }

@@ -19,7 +19,7 @@ are retained for 30 days.
 
 ```sh
 # Requires authenticated gh. Choose your platform's asset pattern.
-gh release download v0.3.0 --repo YannLex/rollback-risk-lint --pattern '*aarch64-apple-darwin*'
+gh release download v0.4.0 --repo YannLex/rollback-risk-lint --pattern '*aarch64-apple-darwin*'
 shasum -a 256 -c rollback-risk-lint-aarch64-apple-darwin.tar.gz.sha256
 tar -xzf rollback-risk-lint-aarch64-apple-darwin.tar.gz
 ./rollback-risk-lint-aarch64-apple-darwin/rollback-risk-lint --help
@@ -56,6 +56,25 @@ Revision mode scans **committed** changes; it does not include uncommitted edits
 It resolves refs to commit IDs, disables external diff/textconv execution, and
 requires a common ancestor. Missing refs/history produce an error, not a pass.
 There is no direct PR/MR URL fetcher in this version: CI supplies refs or a patch.
+
+## Coding review agent protocol
+
+Use revision mode to generate a review packet for a trusted coding review agent:
+
+```sh
+rollback-risk-lint --repo /path/to/project --base BASE_SHA --head HEAD_SHA \
+  --agent-review > /private/review-packet.json
+# The agent investigates every item and writes /private/review-receipt.json.
+rollback-risk-lint --repo /path/to/project --base BASE_SHA --head HEAD_SHA \
+  --agent-review --review /private/review-receipt.json
+```
+
+See [the review protocol](docs/agent-review.md) for receipt format and merge workflow.
+The validator recomputes the packet and returns `ALLOW`, `BLOCK` or `INCOMPLETE`.
+Every packet requires a complete-diff coverage assessment, even with no findings.
+Evidence is an agent attestation: this checks completeness and freshness, not
+whether the evidence is true. `ALLOW` completes rollback-risk review; repository
+authorization, other reviews, required CI and branch protection still apply.
 
 ## Rules
 

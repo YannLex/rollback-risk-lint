@@ -48,3 +48,15 @@ fn malformed_duplicate_unknown_and_blank_resolutions_cannot_allow() {
         "INCOMPLETE"
     );
 }
+
+#[test]
+fn coverage_requires_verification_and_empty_packets_cannot_allow() {
+    let p = packet("base", "head", json!({}), json!({"findings":[]}));
+    let r = json!({"packet":p,"resolutions":[{"id":"coverage","status":"false_positive","evidence":["checked"]}]});
+    assert_eq!(verdict(&p, &r)["verdict"], "INCOMPLETE");
+    let invalid = json!({"items":[]});
+    assert_eq!(
+        verdict(&invalid, &json!({"packet":invalid,"resolutions":[]}))["verdict"],
+        "INCOMPLETE"
+    );
+}
