@@ -1,0 +1,14 @@
+diff --git a/migrations/002.sql b/migrations/002.sql
+new file mode 100644
+--- /dev/null
++++ b/migrations/002.sql
+@@ -0,0 +1,2 @@
++ALTER TABLE orders DROP COLUMN original_amount;
++UPDATE orders SET amount = amount * 100;
+diff --git a/worker.py b/worker.py
+--- a/worker.py
++++ b/worker.py
+@@ -1,2 +1,2 @@
+-idempotency_key = order.id
++idempotency_key = random_uuid()
+ client.post(payment_url, json=order)
