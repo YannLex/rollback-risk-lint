@@ -433,3 +433,19 @@ fn configured_call_names_in_changed_strings_are_not_declared_effects() {
     repo.commit();
     assert!(repo.report()["findings"].as_array().unwrap().is_empty());
 }
+
+#[test]
+fn syntactically_duplicate_declarations_are_not_paired_arbitrarily() {
+    let old = "class Worker {\nvoid process(Order first) { first.amount = 1; repository.save(first); }\nvoid process(Order second) { repository.save(second); }\n}\n";
+    let repo = Repo::new("Worker.java", old, None);
+    fs::write(repo.path.join("Worker.java"), old.replace("= 1", "= 2")).unwrap();
+    repo.commit();
+    let report = repo.report();
+    assert!(function_findings(&report).is_empty());
+    assert!(
+        !report["function_analysis"]["warnings"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}

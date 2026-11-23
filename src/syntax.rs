@@ -142,6 +142,24 @@ fn collect(node: Node<'_>, source: &str, parents: &[String], output: &mut Vec<Fu
     let mut parents = parents.to_vec();
     if scope && let Some(name) = node.child_by_field_name("name") {
         let mut name = text(name, source).to_owned();
+        if let Some(parameters) = node.child_by_field_name("parameters")
+            && parameters.kind() == "formal_parameters"
+        {
+            let mut cursor = parameters.walk();
+            let types: Vec<_> = parameters
+                .named_children(&mut cursor)
+                .filter(|p| !p.kind().contains("comment"))
+                .map(|p| {
+                    let kind = p.child_by_field_name("type").unwrap_or(p);
+                    text(kind, source)
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .collect::<String>()
+                })
+                .collect();
+            name = format!("{name}({})", types.join(","));
+        }
+
         // Go method receiver types distinguish the same method on different types.
         if let Some(receiver) = node.child_by_field_name("receiver") {
             let mut cursor = receiver.walk();

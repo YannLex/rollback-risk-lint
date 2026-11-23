@@ -75,6 +75,12 @@ pub fn review_functions(
         }
         for f in &after {
             if duplicates.contains(&f.name) {
+                if !lines.iter().any(|l| {
+                    l.path == file.path && l.side == "new" && l.line >= f.start && l.line <= f.end
+                }) {
+                    continue;
+                }
+
                 let message = format!(
                     "{}: ambiguous function {}; overloaded functions were not paired",
                     file.path, f.name
