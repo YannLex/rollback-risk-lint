@@ -19,7 +19,7 @@ are retained for 30 days.
 
 ```sh
 # Requires authenticated gh. Choose your platform's asset pattern.
-gh release download v0.2.0 --repo YannLex/rollback-risk-lint --pattern '*aarch64-apple-darwin*'
+gh release download v0.3.0 --repo YannLex/rollback-risk-lint --pattern '*aarch64-apple-darwin*'
 shasum -a 256 -c rollback-risk-lint-aarch64-apple-darwin.tar.gz.sha256
 tar -xzf rollback-risk-lint-aarch64-apple-darwin.tar.gz
 ./rollback-risk-lint-aarch64-apple-darwin/rollback-risk-lint --help
@@ -70,42 +70,78 @@ There is no direct PR/MR URL fetcher in this version: CI supplies refs or a patc
 | RRL007 | review | Record selection/replacement changes in write components | Trace to write, boundary/replay tests, retained originals, repair |
 | RRL008 | review | Payload values or eligibility changes in write components | Old/new readers, write modes, replay/repair |
 | RRL009 | review | Publication/routing/write-mode configuration changes | Effective config, owning gate, consumer idempotency, in-flight work |
+| RRL010 | review | Changed Java/Python/Go function with an unchanged candidate effect call | Trace changed inputs/control/write sets to the reported boundary |
 
-These are **heuristic review signals**, not whole-program or type-resolved analysis.
-The extension filter covers SQL, Python, Go, Java, Kotlin, Rust, JavaScript,
-TypeScript, Ruby, PHP, C#, Scala, shell and protobuf. Configuration rules also
-inspect YAML, properties, TOML, JSON and environment files.
+## Repository effect policy
 
-Persistence/outbound calls use receiver-name tokens to distinguish likely effect
-boundaries from ambiguous names such as `update`, `put`, `remove` or `capture`.
-Known local declarations (maps, JSON nodes, byte buffers, CRC accumulators) in the
-same hunk suppress sink-call alerts. This is bounded declaration recognition,
-not actual type resolution: differently named real sinks can still be missed.
+Create `.rollback-risk-lint.json` in the repository being reviewed. Start from
+[the synthetic example](.rollback-risk-lint.example.json):
 
-Replacement and payload rules inspect write-oriented component paths containing
-`writer`, `repository`, `persistence` or `storage`. They flag changed selection,
-setters, record-field assignments, or eligibility guards near payload assignments,
-even when no sink line changes. They ask the reviewer to trace the actual write;
-they do not prove that the local data reaches durable storage. Changes in upstream
-orchestration, helpers outside these components, and unknown component names can
-still escape detection. Configuration matching recognizes flat effect-related
-keys and nested YAML namespaces visible within the hunk; it is not a complete
-YAML/JSON/TOML interpreter or effective-deployment evaluator.
+```json
+{
+  "version": 1,
+  "effects": [
+    {"name": "replace-orders", "receiver": "orderStore", "method": "replace", "kind": "persistence"},
+    {"name": "publish-events", "receiver": "eventBus", "method": "publish", "kind": "message"}
+  ],
+  "pure": [{"receiver": "cache", "method": "save"}]
+}
+```
 
-Tests and fixtures are **excluded by default**, including conventional test
-directories, Go `_test.go`, Python `test_*`, JS/TS `.test`/`.spec`, and Java
-`*Test`, `*Tests`, `*CT`. Use `--include-tests` to inspect them. Both excluded tests
-and unsupported extensions appear in `skipped_files`. Formatting-only replacements
-are ignored. Old/new evidence for the same sink in a hunk is grouped into one
-finding; contextual replacement/payload signals are grouped by file.
+Kinds: `persistence`, `message`, `http`, `payment`. Each effect requires a unique,
+nonempty name; methods must be nonempty. Unknown JSON fields and policy versions
+are errors. Policy matching is case-sensitive and literal: `receiver: "orderStore"`
+also matches `this.orderStore` or `self.orderStore`. An empty receiver selects
+unqualified function calls. `receiver: "*"` deliberately matches any receiver;
+use optional `path_suffix` to constrain such rules to a file or directory suffix.
+The first matching effect wins. Declared effects take precedence over `pure`
+entries; pure entries suppress only sink guesses, not code from the surrounding
+function comparison. These declarations are repository knowledge, not verified
+types or proof of an external effect.
 
-Multiline statements, indirect calls, dynamic SQL, ORM-specific migrations,
-storage units/semantics, most schema formats, and side effects with unknown
-names can escape detection. Simple full-line comments are ignored; this is not
-a comment/string parser. Mode-only changes and pure renames have no rule coverage.
-Binary, submodule, combined, non-UTF-8 or malformed diffs fail with exit 2 and need
-separate review. Empty diffs are valid. Input must be Git-style unified diff,
-without mail-format wrappers. No findings does not establish rollback safety.
+Revision mode loads policy from the **resolved `--base` commit**, while the code
+diff uses merge-base(BASE, HEAD)..HEAD. Thus a PR cannot disable its own checks by
+editing policy, and policy newly added to the target branch applies even when
+the feature branch diverged earlier. Use `--config /trusted/policy.json` for an
+explicit override. Patch-only mode uses that explicit file or built-in defaults;
+it does not search the working directory for policy.
+
+## Function-level review and limits
+
+With `--base`/`--head`, Java, Python and Go files are read directly from Git objects
+and parsed with Tree-sitter. Nothing from the target application is executed.
+Changed functions are compared against their previous version. If a semantic
+change shares a function with an unchanged candidate effect call, RRL010 reports
+both the changed lines and the actual call location. This can reveal changed
+payloads, eligibility or write-set construction outside the small patch hunk.
+
+Java methods are paired by enclosing names and syntactic parameter types; Python
+and Go use enclosing names (plus Go receiver types). Duplicate identities and
+syntax errors are reported in `function_analysis.warnings`. This is syntactic
+comparison, not compiler type resolution, a control-flow proof or interprocedural
+data-flow analysis. An unrelated semantic edit in the same function can still
+produce a candidate. Preparation in a separate function, deferred commit stages,
+changed signatures, aliases, reflection, unknown boundaries and function/file
+renames can still escape detection. Ordinary comments, formatting, docstrings and
+standalone logging with no nested calls are ignored; nested calls remain visible.
+
+Patch-only reports explicitly use `function_analysis.mode: "patch_only"` and warn
+that full-function review was unavailable. Other source languages continue to use
+hunk rules: SQL, Kotlin, Rust, JavaScript/TypeScript, Ruby, PHP, C#, Scala, shell
+and protobuf. Configuration rules cover YAML, properties, TOML, JSON and env files.
+These hunk rules are lexical and can miss multiline or indirect behavior.
+
+Receiver-name heuristics and known local declarations reduce ambiguous `update`,
+`put`, `remove` and `capture` alerts. They are not type resolution. Tests/fixtures
+are excluded by default (test directories, Go `_test.go`, Python `test_*`, JS/TS
+`.test`/`.spec`, Java `*Test`/`*Tests`/`*CT`); opt in with `--include-tests`.
+Excluded files appear in `skipped_files`. Old/new sink lines are grouped; contextual
+replacement/payload signals are grouped by file. Mode-only and rename-only diffs
+have no rule coverage. Binary, submodule, combined, non-UTF-8 and malformed input
+fail with exit 2. Empty Git-style unified diffs are valid; mail wrappers are not.
+
+No findings does not establish rollback safety. The tool cannot verify whether
+a configuration was deployed or whether a proposed repair actually works.
 
 ## Output and CI policy
 
@@ -113,6 +149,11 @@ Text is intended for reviewers. `--format json` returns a versioned object with
 `schema_version`, `findings`, `skipped_files`, and `limitation`. Each finding carries
 its rule ID, severity, path, line, diff side, literal evidence, risk and requested
 recovery evidence. `related_evidence` retains grouped old/new locations and text.
+`boundary` distinguishes `configured` from `heuristic` calls and includes its kind,
+policy name, receiver, method and location. `function_name` identifies function
+candidates. `policy_source` records `base`, `explicit` or `default`.
+`function_analysis` reports its mode, successfully parsed files, paired functions
+and coverage warnings. None of these counts measure detection accuracy.
 The primary location prefers a new-side line when one exists. Removed lines use the **old** path/line; additions use the new.
 Evidence may contain proprietary data: apply your repository's log access policy.
 
@@ -185,4 +226,5 @@ The next layer should use language/schema adapters to extract changed writes,
 contracts, destinations and idempotency behavior, followed by semantic review.
 Keep observations separate from inferred risks. An optional model-based reviewer
 should cite code and identify missing context rather than assert reversibility.
-Neither AST analysis nor model review is implemented in this version.
+Java/Python/Go function parsing is implemented. Compiler type resolution,
+interprocedural data flow and model review are not implemented.

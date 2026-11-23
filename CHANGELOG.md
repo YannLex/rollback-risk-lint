@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- Add trusted, versioned JSON declarations for effect boundaries and local calls.
+- Compare Java/Python/Go functions around unchanged candidate effect calls.
+- Expose declared/heuristic provenance, boundary locations and function-analysis gaps.
+- Pair Java overloads by syntactic parameter types and retain nested effect calls
+  inside logging/interpolated expressions.
+- Keep all new findings review-only; this is not interprocedural data-flow proof.
+
 ## 0.2.0
 
 - Exclude conventional test and fixture files by default; add `--include-tests`.

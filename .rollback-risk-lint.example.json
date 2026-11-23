@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "effects": [
+    {"name": "replace-orders", "receiver": "orderStore", "method": "replace", "kind": "persistence"},
+    {"name": "publish-events", "receiver": "eventBus", "method": "publish", "kind": "message"}
+  ],
+  "pure": [{"receiver": "cache", "method": "save"}]
+}
