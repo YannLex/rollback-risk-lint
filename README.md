@@ -1,226 +1,283 @@
 # rollback-risk-lint
 
-A Rust CLI for reviewing changes whose effects may outlive a service rollback.
-It reads Git diffs rather than depending on a Java, Python or Go build system.
+A review tool for developers and coding agents deciding whether a PR/MR can be
+merged when its effects may survive a service rollback.
 
-Rolling back code does not undo incorrect writes, restore deleted data, cancel
-external actions, or guarantee that an old version can read newly written data.
-This tool surfaces evidence that deserves a recovery or compatibility review.
-It does **not** certify rollback safety.
+A coding agent changes the code; a trusted review agent uses this CLI to collect
+rollback-risk signals, investigates the actual effects, and records its evidence.
+The CLI validates that review against the current inputs. An authorized merge
+agent can then use the result as one gate in an automatic merge workflow.
 
-## Download a binary
+Rolling back a service does not restore overwritten data, undo external actions,
+remove queued messages or make new data readable by an older version. Those are
+the risks this review targets. The scanner is heuristic; the receipt validator
+checks completeness and freshness, not evidence truth or rollback safety.
 
-Download a platform archive and its `.sha256` from the repository's
-[Releases](https://github.com/YannLex/rollback-risk-lint/releases). Builds cover
-Linux x86-64 (GNU, glibc 2.35+), macOS Apple Silicon, and Windows x86-64.
-GitHub login is required while the repository is private. Release assets persist;
-per-commit [Actions artifacts](https://github.com/YannLex/rollback-risk-lint/actions)
-are retained for 30 days.
+## The review-to-merge workflow
+
+| Stage | Responsible component | Output |
+| --- | --- | --- |
+| Identify the change | Orchestrator | Repository, PR/MR, immutable base/head commits, merge policy |
+| Collect signals | `rollback-risk-lint --agent-review` | Packet with findings, skips, analysis gaps and coverage task |
+| Investigate | Trusted review agent | Evidence and a disposition for every packet item |
+| Validate | `rollback-risk-lint --agent-review --review …` | `ALLOW`, `BLOCK` or `INCOMPLETE` |
+| Merge when authorized | Merge agent / platform | Protected exact-head merge or queue entry |
+
+The CLI does not contain a model reviewer, fetch PR metadata, authenticate a
+reviewer or perform merges. Your agent harness supplies those capabilities.
+`ALLOW` completes the rollback-risk review stage; repository authorization,
+functional/security review, required CI and branch protection still apply.
+
+## Install a trusted binary
+
+Download a pinned version and its checksum from
+[Releases](https://github.com/YannLex/rollback-risk-lint/releases).
+Available platforms are Linux x86-64 (GNU, glibc 2.35+), macOS Apple Silicon and
+Windows x86-64. Private repository downloads require GitHub authentication.
+Git is required for revision analysis; Rust is only needed to build from source.
 
 ```sh
-# Requires authenticated gh. Choose your platform's asset pattern.
-gh release download v0.4.0 --repo YannLex/rollback-risk-lint --pattern '*aarch64-apple-darwin*'
+# macOS Apple Silicon example; choose the archive for your platform.
+gh release download v0.4.0 --repo YannLex/rollback-risk-lint \
+  --pattern '*aarch64-apple-darwin*'
 shasum -a 256 -c rollback-risk-lint-aarch64-apple-darwin.tar.gz.sha256
 tar -xzf rollback-risk-lint-aarch64-apple-darwin.tar.gz
-./rollback-risk-lint-aarch64-apple-darwin/rollback-risk-lint --help
+./rollback-risk-lint-aarch64-apple-darwin/rollback-risk-lint --version
 ```
 
-Linux users can use `sha256sum -c`; Windows users can compare `Get-FileHash`
-with the checksum file and extract the zip. On macOS, local security settings
-may require approval before running a downloaded, unsigned binary.
+Put the extracted executable on your agent's PATH. Linux can use `sha256sum -c`;
+Windows can compare `Get-FileHash` with the checksum and extract the zip.
+To build a reviewed source checkout instead, run `cargo install --path . --locked`.
+Provision the tool from a trusted release or revision, independently of the PR
+being reviewed. Per-commit [Actions artifacts](https://github.com/YannLex/rollback-risk-lint/actions)
+are retained for 30 days; release assets persist.
 
-## Install and run
+## Run a review agent
 
-Requires Rust with edition 2024 support and Git for revision comparisons.
+### 1. Capture the review scope and packet
 
-```sh
-cargo install --path . --locked
+Read the target repository's instructions and establish its merge policy. Resolve
+the intended PR/MR's current base and head through your platform integration,
+fetch both commits and enough history, and supply their immutable SHAs below.
+Use private storage outside tracked target files for packets and receipts.
 
-# PR/MR scope: merge-base(BASE, HEAD)..HEAD. Fetch both refs and enough history first.
-rollback-risk-lint --repo /path/to/project --base origin/main --head HEAD
-
-# Git-style unified patches from either GitHub or GitLab; no platform token needed.
-git diff --no-ext-diff --no-textconv origin/main...HEAD > change.patch
-rollback-risk-lint --diff change.patch --format json
-
-# stdin; use pipefail so an upstream Git error is not mistaken for an empty diff.
-set -o pipefail
-git diff --no-ext-diff --no-textconv origin/main...HEAD |
-  rollback-risk-lint --diff - --fail-on review
-
-# Included demonstration (exits 1 by design).
-rollback-risk-lint --diff examples/risky.patch
+```bash
+set -euo pipefail
+umask 077
+repo=/path/to/target-repository
+base_sha=BASE_COMMIT_SHA
+head_sha=HEAD_COMMIT_SHA
+review_dir=$(mktemp -d "${TMPDIR:-/tmp}/rollback-review.XXXXXX")
+rrl=(rollback-risk-lint --repo "$repo" --base "$base_sha" --head "$head_sha")
+"${rrl[@]}" --agent-review > "$review_dir/packet.json"
 ```
 
-Revision mode scans **committed** changes; it does not include uncommitted edits.
-It resolves refs to commit IDs, disables external diff/textconv execution, and
-requires a common ancestor. Missing refs/history produce an error, not a pass.
-There is no direct PR/MR URL fetcher in this version: CI supplies refs or a patch.
+Revision mode scans committed changes in `merge-base(BASE, HEAD)..HEAD`, reads Git
+blobs directly, and disables external diff/textconv execution. It does not execute
+the target application or include uncommitted edits. Missing refs/history or
+unsupported input fail with exit 2. Packet generation exits 0 without granting ALLOW.
 
-## Coding review agent protocol
+### 2. Investigate every item
 
-Use revision mode to generate a review packet for a trusted coding review agent:
+Give the trusted review agent the packet and access to the scoped source. Its job:
 
-```sh
-rollback-risk-lint --repo /path/to/project --base BASE_SHA --head HEAD_SHA \
-  --agent-review > /private/review-packet.json
-# The agent investigates every item and writes /private/review-receipt.json.
-rollback-risk-lint --repo /path/to/project --base BASE_SHA --head HEAD_SHA \
-  --agent-review --review /private/review-receipt.json
-```
+- Trace changed values, predicates and control flow to persistence, publication,
+  external calls or other effects. Check actual boundaries rather than relying
+  on receiver names or configured declarations alone.
+- Explain what survives rollback: write identity/scope, overwritten originals,
+  old/new reader compatibility, retries, idempotency and in-flight/queued work.
+  Inspect effective configuration and downstream consumers when relevant.
+- Evaluate recovery evidence: retained originals, restore/replay tests,
+  compensation or staged rollout controls. Distinguish an executed check from a
+  proposed plan. Fix risks and regenerate the packet after code changes.
+- Review the complete diff beyond the scanner's coverage, including skipped files,
+  helper changes, schemas, configuration and indirect effects. An empty finding
+  list still requires this assessment. Missing context remains incomplete.
 
-See [the review protocol](docs/agent-review.md) for receipt format and merge workflow.
-The validator recomputes the packet and returns `ALLOW`, `BLOCK` or `INCOMPLETE`.
-Every packet requires a complete-diff coverage assessment, even with no findings.
-Evidence is an agent attestation: this checks completeness and freshness, not
-whether the evidence is true. `ALLOW` completes rollback-risk review; repository
-authorization, other reviews, required CI and branch protection still apply.
-
-## Rules
-
-| ID | Severity | Signal | Review evidence |
-| --- | --- | --- | --- |
-| RRL001 | high | Added DROP TABLE/DATABASE/SCHEMA/COLUMN, TRUNCATE, ALTER TABLE … DROP | Restore rehearsal, retained originals, expand/contract rollout |
-| RRL002 | review | Added SQL UPDATE … SET / DELETE FROM | Target rows, predicates, original values, repair procedure |
-| RRL003 | review | Added/removed idempotency or deduplication identifiers | Retry/replay and mixed-version behavior, duplicate repair |
-| RRL004 | review | Likely persistence calls, using receiver hints | Write identity, scope, values and repair procedure |
-| RRL005 | review | Likely outbound/payment calls, using receiver hints | Destination, compensation, retries and queued/in-flight work |
-| RRL006 | review | Removed/changed protobuf assignments | Reader/writer compatibility, field numbers, queued data |
-| RRL007 | review | Record selection/replacement changes in write components | Trace to write, boundary/replay tests, retained originals, repair |
-| RRL008 | review | Payload values or eligibility changes in write components | Old/new readers, write modes, replay/repair |
-| RRL009 | review | Publication/routing/write-mode configuration changes | Effective config, owning gate, consumer idempotency, in-flight work |
-| RRL010 | review | Changed Java/Python/Go function with an unchanged candidate effect call | Trace changed inputs/control/write sets to the reported boundary |
-
-## Repository effect policy
-
-Create `.rollback-risk-lint.json` in the repository being reviewed. Start from
-[the synthetic example](.rollback-risk-lint.example.json):
+The agent writes `receipt.json` containing the **entire original packet** and
+exactly one resolution per item:
 
 ```json
 {
-  "version": 1,
-  "effects": [
-    {"name": "replace-orders", "receiver": "orderStore", "method": "replace", "kind": "persistence"},
-    {"name": "publish-events", "receiver": "eventBus", "method": "publish", "kind": "message"}
-  ],
-  "pure": [{"receiver": "cache", "method": "save"}]
+  "packet": { "...": "entire packet.json object, unchanged" },
+  "resolutions": [
+    {
+      "id": "coverage",
+      "status": "verified",
+      "evidence": ["Actual file:line references, downstream paths checked, check results and limits"]
+    }
+  ]
 }
 ```
 
-Kinds: `persistence`, `message`, `http`, `payment`. Each effect requires a unique,
-nonempty name; methods must be nonempty. Unknown JSON fields and policy versions
-are errors. Policy matching is case-sensitive and literal: `receiver: "orderStore"`
-also matches `this.orderStore` or `self.orderStore`. An empty receiver selects
-unqualified function calls. `receiver: "*"` deliberately matches any receiver;
-use optional `path_suffix` to constrain such rules to a file or directory suffix.
-The first matching effect wins. Declared effects take precedence over `pure`
-entries; pure entries suppress only sink guesses, not code from the surrounding
-function comparison. These declarations are repository knowledge, not verified
-types or proof of an external effect.
+This is a format illustration, not a ready-to-accept receipt. Do not copy the
+placeholder evidence or generate canned resolutions. `coverage` requires
+`verified`. Every `finding:N`, `skip:N` and `gap:N` also needs a resolution:
+`verified` (investigated and acceptable), `false_positive` (effect disproved),
+`mitigated` (validated controls address the risk), or `blocked` (unresolved risk).
+Nonblocked dispositions require nonempty evidence strings.
 
-Revision mode loads policy from the **resolved `--base` commit**, while the code
-diff uses merge-base(BASE, HEAD)..HEAD. Thus a PR cannot disable its own checks by
-editing policy, and policy newly added to the target branch applies even when
-the feature branch diverged earlier. Use `--config /trusted/policy.json` for an
-explicit override. Patch-only mode uses that explicit file or built-in defaults;
-it does not search the working directory for policy.
+### 3. Recompute and validate
 
-## Function-level review and limits
+```bash
+"${rrl[@]}" --agent-review --review "$review_dir/receipt.json" \
+  > "$review_dir/decision.json"
+```
 
-With `--base`/`--head`, Java, Python and Go files are read directly from Git objects
-and parsed with Tree-sitter. Nothing from the target application is executed.
-Changed functions are compared against their previous version. If a semantic
-change shares a function with an unchanged candidate effect call, RRL010 reports
-both the changed lines and the actual call location. This can reveal changed
-payloads, eligibility or write-set construction outside the small patch hunk.
+| Result | Exit | Next action |
+| --- | --- | --- |
+| `ALLOW` | 0 | Continue to repository merge gates |
+| `BLOCK` | 1 | Resolve the identified risk, regenerate and review again |
+| `INCOMPLETE` | 1 | Supply missing evidence/context or review a fresh packet |
+| Input/tool failure | 2 | Fix the failure; never interpret it as a pass |
 
-Java methods are paired by enclosing names and syntactic parameter types; Python
-and Go use enclosing names (plus Go receiver types). Duplicate identities and
-syntax errors are reported in `function_analysis.warnings`. This is syntactic
-comparison, not compiler type resolution, a control-flow proof or interprocedural
-data-flow analysis. An unrelated semantic edit in the same function can still
-produce a candidate. Preparation in a separate function, deferred commit stages,
-changed signatures, aliases, reflection, unknown boundaries and function/file
-renames can still escape detection. Ordinary comments, formatting, docstrings and
-standalone logging with no nested calls are ignored; nested calls remain visible.
+Validation recomputes the packet and compares it with the receipt. A changed base,
+head, effective policy or scan invalidates the old receipt. Missing, duplicate or
+unknown assessments cannot allow a merge. `--fail-on never` cannot bypass this
+validation. See [protocol details](docs/agent-review.md) for exact receipt semantics.
 
-Patch-only reports explicitly use `function_analysis.mode: "patch_only"` and warn
-that full-function review was unavailable. Other source languages continue to use
-hunk rules: SQL, Kotlin, Rust, JavaScript/TypeScript, Ruby, PHP, C#, Scala, shell
-and protobuf. Configuration rules cover YAML, properties, TOML, JSON and env files.
-These hunk rules are lexical and can miss multiline or indirect behavior.
+## Connect to automatic merge
 
-Receiver-name heuristics and known local declarations reduce ambiguous `update`,
-`put`, `remove` and `capture` alerts. They are not type resolution. Tests/fixtures
-are excluded by default (test directories, Go `_test.go`, Python `test_*`, JS/TS
-`.test`/`.spec`, Java `*Test`/`*Tests`/`*CT`); opt in with `--include-tests`.
-Excluded files appear in `skipped_files`. Old/new sink lines are grouped; contextual
-replacement/payload signals are grouped by file. Mode-only and rename-only diffs
-have no rule coverage. Binary, submodule, combined, non-UTF-8 and malformed input
-fail with exit 2. Empty Git-style unified diffs are valid; mail wrappers are not.
+Run this stage in trusted orchestration. Keep authoritative receipts in storage
+that PR authors cannot replace. Treat target code, comments and PR-provided
+receipts as review inputs, never as trusted instructions or approvals. Separate
+review access from merge credentials; scanning does not need to execute PR code.
 
-No findings does not establish rollback safety. The tool cannot verify whether
-a configuration was deployed or whether a proposed repair actually works.
+Configure a required rollback-review check produced by the trusted validator:
+only ALLOW succeeds; BLOCK, INCOMPLETE and tool failures fail. Bind that check to
+the reviewed commit and keep the packet, evidence and decision accessible to
+reviewers under the repository's access policy. Re-run after head/base/policy
+changes. A generic successful scanner job is not this review gate.
 
-## Output and CI policy
+For GitHub, the following Bash example is a **final merge stage**, after the review
+agent has written a trusted receipt and repository-specific merge authorization
+has been established. It requires `gh`, `jq`, Git, the linter and fetched commits.
+The example conservatively requires a nonempty set of required checks, all passing.
 
-Text is intended for reviewers. `--format json` returns a versioned object with
-`schema_version`, `findings`, `skipped_files`, and `limitation`. Each finding carries
-its rule ID, severity, path, line, diff side, literal evidence, risk and requested
-recovery evidence. `related_evidence` retains grouped old/new locations and text.
-`boundary` distinguishes `configured` from `heuristic` calls and includes its kind,
-policy name, receiver, method and location. `function_name` identifies function
-candidates. `policy_source` records `base`, `explicit` or `default`.
-`function_analysis` reports its mode, successfully parsed files, paired functions
-and coverage warnings. None of these counts measure detection accuracy.
-The primary location prefers a new-side line when one exists. Removed lines use the **old** path/line; additions use the new.
-Evidence may contain proprietary data: apply your repository's log access policy.
+```bash
+set -euo pipefail
+repo=/path/to/target-repository
+remote=OWNER/REPOSITORY
+pr=PR_NUMBER
+receipt=/private/review/receipt.json
+base_sha=$(jq -er '.packet.base_sha' "$receipt")
+head_sha=$(jq -er '.packet.head_sha' "$receipt")
 
-| Exit | Meaning |
+# Recompute the packet; any non-ALLOW result stops this script.
+decision=$(rollback-risk-lint --repo "$repo" --base "$base_sha" --head "$head_sha" \
+  --agent-review --review "$receipt")
+jq -e '.verdict == "ALLOW"' <<< "$decision" > /dev/null
+
+# Ensure the intended PR still has the reviewed scope.
+current=$(gh pr view "$pr" --repo "$remote" \
+  --json baseRefOid,headRefOid,state,isDraft)
+jq -e --arg base "$base_sha" --arg head "$head_sha" \
+  '.state == "OPEN" and (.isDraft | not) and
+   .baseRefOid == $base and .headRefOid == $head' <<< "$current" > /dev/null
+checks=$(gh pr checks "$pr" --repo "$remote" --required --json bucket)
+jq -e 'length > 0 and all(.[]; .bucket == "pass")' <<< "$checks" > /dev/null
+
+# Choose the repository's permitted merge method; respect its protections/queue.
+gh pr merge "$pr" --repo "$remote" --squash --match-head-commit "$head_sha"
+```
+
+The exact-head guard rejects a changed PR head at submission. It does not atomically
+lock the base. Use required up-to-date checks or a merge queue, and configure
+review revalidation for the queued candidate when its base changes. Queue entry
+is not confirmation that a PR has merged. Do not bypass protections with `--admin`.
+If you enable deferred `--auto` merging, the trusted review gate must remain
+required and re-run for subsequent heads; a one-time local ALLOW is insufficient.
+
+For GitLab, apply the same sequence through your MR integration: validate a fresh
+receipt, match the current source and target revisions, check required pipelines
+and approvals, then use the merge API's source-head SHA guard and protected merge
+policy. Configure revalidation for target-branch changes or merge trains. The CLI
+itself is platform-independent and provides no GitHub/GitLab merge adapter.
+
+## Detection coverage and repository policy
+
+Java, Python and Go revision analysis parses full changed files with Tree-sitter.
+RRL010 compares changed functions around unchanged candidate effect calls, exposing
+changes outside the small patch hunk. Other supported source/config formats use
+lexical hunk rules.
+
+| Rule | Signal |
 | --- | --- |
-| 0 | Completed without findings at the selected failure threshold |
-| 1 | Findings reached the selected threshold |
-| 2 | Invalid arguments, input, Git failure or unsupported patch |
+| RRL001 | Destructive SQL: DROP, TRUNCATE, dropped columns |
+| RRL002 | SQL UPDATE/DELETE |
+| RRL003 | Idempotency/deduplication identifier changes |
+| RRL004 | Likely persistence calls |
+| RRL005 | Likely outbound/payment calls |
+| RRL006 | Removed/changed protobuf assignments |
+| RRL007 | Record selection/replacement changes in write components |
+| RRL008 | Payload/eligibility changes in write components |
+| RRL009 | Publication/routing/write-mode configuration changes |
+| RRL010 | Changed Java/Python/Go function with an unchanged candidate effect call |
 
-Default `--fail-on high` gates destructive SQL. `--fail-on review` gates all signals;
-`--fail-on never` reports findings without failing, but input errors still fail.
-No inline suppression or automatically accepted recovery claim is provided.
-A reviewer must evaluate recovery evidence; this tool cannot validate a plan by
-checking that a paragraph exists.
+Declare known boundaries in the target repository's `.rollback-risk-lint.json`;
+start with [the synthetic policy example](.rollback-risk-lint.example.json).
+Effects specify `name`, `receiver`, `method` and `kind` (`persistence`, `message`,
+`http`, `payment`); `pure` entries suppress guesses about local calls. Matching is
+literal and case-sensitive. A receiver also matches `this.`/`self.` qualification;
+`""` selects unqualified calls, `"*"` any receiver, and optional `path_suffix`
+constrains paths. First matching effect wins; effects take precedence over pure
+entries. Unknown fields/versions are errors. Declarations are knowledge to verify,
+not compiler-resolved types or proof that a runtime effect occurs.
 
-For GitHub Actions, fetch full history (`actions/checkout` with `fetch-depth: 0`)
-and run an installed, reviewed build of the linter:
+Revision mode loads policy from the **resolved base commit**, while the code diff
+uses the merge-base. A head-only policy edit cannot disable its own checks. Use
+`--config /trusted/policy.json` for a reviewed explicit override. Review policy
+changes separately; never accept an untrusted head policy as that override.
 
-```yaml
-- name: Review rollback risk
-  env:
-    BASE_SHA: ${{ github.event.pull_request.base.sha }}
-    HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-  run: rollback-risk-lint --base "$BASE_SHA" --head "$HEAD_SHA" --format json
+Limits the review agent must cover:
+
+- Correlation within a function is not control-flow or interprocedural data-flow
+  proof. Unrelated edits can produce findings; helpers, aliases, reflection,
+  deferred commits, changed signatures and renames can hide effects.
+- Java functions are paired by enclosing names and syntactic parameter types;
+  Python/Go use enclosing names, plus Go receiver types. Duplicate identities and
+  syntax errors appear in `function_analysis.warnings`.
+- Tests/fixtures are excluded by default and listed in `skipped_files`.
+  `--include-tests` opts in; excluded files still need agent review coverage.
+- Other hunk-rule languages include SQL, Kotlin, Rust, JavaScript/TypeScript,
+  Ruby, PHP, C#, Scala, shell and protobuf; config rules cover YAML, properties,
+  TOML, JSON and env files. Multiline/indirect behavior can be missed.
+- Mode-only and rename-only diffs have no rule coverage. Binary, submodule,
+  combined, non-UTF-8 and malformed input fail with exit 2. The tool cannot prove
+  that a configuration was deployed or that a recovery plan works.
+
+## Standalone scans and output
+
+For investigation without the receipt protocol:
+
+```sh
+rollback-risk-lint --repo /path/to/project --base BASE_SHA --head HEAD_SHA \
+  --format json --fail-on never
+rollback-risk-lint --diff /path/to/change.patch --format json
 ```
 
-Use this step on `pull_request` events. Make sure both commit objects are present.
-Do not execute source code from the target PR just to analyze it. Provision the
-linter from a trusted revision in your CI image or preceding installation step;
-GitHub repository access is needed while this project is private.
+Patch mode accepts complete Git-style unified diffs or `--diff -` for stdin.
+When piping Git output, use `set -o pipefail` and
+`git diff --no-ext-diff --no-textconv BASE...HEAD` so Git errors do not look like
+empty changes. Patch mode has no full-function review and cannot generate an
+agent-review packet. It uses an explicit `--config` or built-in defaults, not a
+working-directory policy.
 
-For a GitLab merge request job with the linter already installed:
+Scan-only exit codes differ from receipt validation: 0 means below the selected
+finding threshold, 1 means the threshold was reached, and 2 means input/tool
+failure. Default `--fail-on high` gates RRL001; `review` gates all signals; `never`
+reports without failing on findings. None of these scan exits grants ALLOW.
 
-```yaml
-rollback-risk:
-  variables:
-    GIT_DEPTH: "0"
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-  script:
-    - git fetch origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
-    - rollback-risk-lint --base "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" --head "$CI_COMMIT_SHA" --format json
-```
+JSON scan output includes `schema_version`, `findings`, `skipped_files`,
+`policy_source`, `function_analysis` and `limitation`. Findings include old/new
+locations, evidence, risk and requested recovery evidence; `related_evidence`
+retains grouped locations. `boundary` and `function_name` identify function-level
+candidates and configured/heuristic provenance. Removed code uses old-side
+locations. Counts describe scan coverage, not detection accuracy.
 
-The repository's own CI checks formatting, Clippy and tests; the integration
-snippets above show how to adopt the CLI in a separate application repository.
+## Contribute and evaluate
 
-## Development
+Read [AGENTS.md](AGENTS.md) before contributing. Run:
 
 ```sh
 cargo fmt --check
@@ -228,22 +285,12 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-Tests exercise cross-language signals, old/new line locations, UTF-8 and spaced
-paths, malformed/unsupported input, exit thresholds, JSON output, safe revision
-resolution, and merge-base behavior on a real diverged Git repository.
+For CLI/packaging changes, build a release binary and run
+`python3 scripts/smoke.py /path/to/rollback-risk-lint`. CI runs native smoke tests
+on all release platforms, covering Java/Python/Go analysis and receipt validation.
 
-## Evaluation privacy
-
-Keep repository-specific evaluations in `docs/evaluations/` (ignored by Git).
-Do not commit internal project identifiers, source patches, MR links, or raw findings.
-Release packages include only the binary, this README and the license. CI uploads
-only packaged binaries and checksums, never local evaluation results.
-
-## Next steps
-
-The next layer should use language/schema adapters to extract changed writes,
-contracts, destinations and idempotency behavior, followed by semantic review.
-Keep observations separate from inferred risks. An optional model-based reviewer
-should cite code and identify missing context rather than assert reversibility.
-Java/Python/Go function parsing is implemented. Compiler type resolution,
-interprocedural data flow and model review are not implemented.
+Use synthetic regression fixtures. Keep project-specific evaluations, patches,
+PR/MR identifiers, packets and raw findings under ignored `docs/evaluations/` or
+outside this repository. Apply the target repository's access policy to evidence;
+never publish it in generic examples, release assets or CI logs. Packages contain
+only the executable, generic README and license.
